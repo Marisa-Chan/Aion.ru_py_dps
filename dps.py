@@ -44,6 +44,10 @@ REFLECT_ATK_ME_TO_B = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Крит
 REFLECT_ATK_A_to_ME = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Критический удар! )?Вы отразили умение и нанесли персонажу ([\w\s\-]+) ([\d\s]+) ед\. урона\.")
 REFLECT_ATK_A_to_B = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Критический удар! )?([\w\s\-]+) отражает атаку и наносит персонажу ([\w\s\-]+) ([\d\s]+) ед\. урона\.")
 
+RUNE_ME_TO_B = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Критический удар! )?([\w\s\-:]+): ([\w\s\-]+) получает ([\d\s]+) ед\. урона и ")
+RUNE_A_TO_ME = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Критический удар! )?([\w\s\-:]+) использует: ([\w\s\-]+)\. Вы (получаете|получили) ([\d\s]+) ед\. урона(, и | и )")
+RUNE_A_TO_B = re.compile("\d\d\d\d\.\d\d.\d\d \d\d:\d\d:\d\d : (Критический удар! )?([\w\s\-:]+) (использует: |использует )([\w\s\-]+)\. ([\w\s\-]+) получает ([\d\s]+) ед\. урона и ")
+
 
 GS = re.compile("магический урон")
 dmgcutter = re.compile("[^0-9]")
@@ -236,8 +240,8 @@ def REFLECT_ATK(txline):
 		who = "Вы"
 		skill = "атака"
 		sskill = stripRoman(skill).lower()
-		target = ps.group(3)
-		dmg = dmgcut(ps.group(4))
+		target = ps.group(2)
+		dmg = dmgcut(ps.group(3))
 		
 		skillDamage(who, skill, sskill, target, dmg, crit)
 		return True
@@ -595,7 +599,7 @@ def SKILL(txline):
 		target = ps.group(3)
 		dmg = dmgcut(ps.group(4))
 		who = ""
-		if (sskill in DotsNames): # Дот
+		if ((sskill in DotsNames) or PassiveSkill.get(sskill)): # Дот
 			dotDamage(skill, sskill, target, dmg, crit)
 		elif ( GS.match(sskill) ): # ГС
 			skillDamage(skill, skill, sskill, target, dmg, crit)
@@ -619,6 +623,51 @@ def SKILL(txline):
 	
 	return False
 
+
+def RUNE_SKILL(txline):
+	#Наше клеймо по кому-то
+	ps = RUNE_ME_TO_B.match(txline)
+	
+	if (ps):
+		crit = ps.group(1) != None
+		who = "Вы"
+		skill = ps.group(2)
+		sskill = stripRoman(skill).lower()
+		target = ps.group(3)
+		dmg = dmgcut(ps.group(4))
+		
+		skillDamage(who, skill, sskill, target, dmg, crit)
+		return True
+		
+	#Клеймо по нам
+	ps = RUNE_A_TO_ME.match(txline)
+	
+	if (ps):
+		crit = ps.group(1) != None
+		who = ps.group(2)
+		skill = ps.group(3)
+		sskill = stripRoman(skill).lower()
+		target = "Вы"
+		dmg = dmgcut(ps.group(5))
+		
+		skillDamage(who, skill, sskill, target, dmg, crit)
+		return True
+		
+	#Клеймо A в B
+	ps = RUNE_A_TO_B.match(txline)
+	
+	if (ps):
+		crit = ps.group(1) != None
+		who = ps.group(2)
+		skill = ps.group(4)
+		sskill = stripRoman(skill).lower()
+		target = ps.group(5)
+		dmg = dmgcut(ps.group(6))
+		
+		skillDamage(who, skill, sskill, target, dmg, crit)
+		return True
+	
+	return False
 
 
 def USING_SKILL(txline):
@@ -664,6 +713,34 @@ def matcher(txline):
 		
 	if (USING_SKILL(txline)):
 		return
+		
+	if (RUNE_SKILL(txline)):
+		return
+	
+	return
+	
+def atkcount(info):
+	count = 0
+	
+	for (Tgt, dmginfo) in info.targets.items():
+		count += len(dmginfo.dmgList)
+	return count
+	
+def atkcountadv(info):
+	atk = 0
+	skill = 0
+	crit = 0
+	
+	for (Tgt, dmginfo) in info.targets.items():
+		for i in dmginfo.dmgList:
+			if (i.critical):
+				crit += 1
+			
+			if (i.skillname == "атака"):
+				atk += 1
+			else:
+				skill += 1
+	return (atk,skill,crit)
 	
 
 
@@ -674,6 +751,8 @@ options["wrkdir"] = "./"
 verbose = 0
 mode = 0
 monster = ""
+order = 0
+skillinfo = 0
 
 # Рабочий каталог
 for idx, p in enumerate(sys.argv):
@@ -712,7 +791,11 @@ for idx, p in enumerate(sys.argv):
 			monster = sys.argv[idx + 1]
 	elif (re.match("-l\Z", p)):
 		if (len(sys.argv) >= idx + 2):
-			options["log"] = sys.argv[idx + 1]	
+			options["log"] = sys.argv[idx + 1]
+	elif (re.match("-r\Z", p)):
+		order = 1
+	elif (re.match("-s\Z", p)):
+		skillinfo = 1
 	
 	
 #### Читаем названия дотов
@@ -737,8 +820,12 @@ chatlog.close()
 
 #Вывод дпса
 if (mode == 0):
-	for (Who, info) in sorted(Actors.items(), key=lambda x: x[1].dps):
+	for (Who, info) in sorted(Actors.items(), key=lambda x: x[1].dps, reverse = order):
 		print(Who + " : " + str(info.dps))
+		if (skillinfo):
+			(atk, skill, krit) = atkcountadv(info)
+			print("\tатак (авто/умений) | крит (%)")
+			print("\t" + str(atk + skill) + " ( " + str(atk) + "/" + str(skill) + " ) | " + str(krit) + " ( " + str(round((krit / (atk + skill)) * 100, 2)) + "% )")
 		
 		if (verbose >= 1):
 			for (Tgt, dmginfo) in sorted(info.targets.items(), key=lambda x: x[1].dps):
@@ -750,9 +837,18 @@ if (mode == 0):
 							print ("\t\t" + i.skillname + " : " + str(i.dmg) + " \t Critical")
 						else:
 							print ("\t\t" + i.skillname + " : " + str(i.dmg)  + " ")
+					
 
 elif (mode == 1):
+
+	predict = dict()
 	for (Who, info) in Actors.items():		
+		for (Tgt, dmginfo) in info.targets.items():
+			if (Tgt.lower() == monster):
+				predict[Who] = dmginfo.dps
+	
+	for (Who, dps) in sorted(predict.items(), key=lambda x: x[1], reverse = order):
+		info = Actors.get(Who)
 		for (Tgt, dmginfo) in info.targets.items():
 			if (Tgt.lower() == monster):
 				print(Who)
@@ -769,7 +865,7 @@ elif (mode == 2):
 	if (info):
 		print(Who + " : " + str(info.dps))
 		
-		for (Tgt, dmginfo) in sorted(info.targets.items(), key=lambda x: x[1].dps):
+		for (Tgt, dmginfo) in sorted(info.targets.items(), key=lambda x: x[1].dps, reverse = order):
 			print ("\t" + Tgt + "\t " + str(dmginfo.dps))
 				
 			if ( verbose >= 1):
@@ -778,3 +874,8 @@ elif (mode == 2):
 						print ("\t\t" + i.skillname + " : " + str(i.dmg) + " \t Critical")
 					else:
 						print ("\t\t" + i.skillname + " : " + str(i.dmg)  + " ")
+						
+		if (skillinfo):
+			(atk, skill, krit) = atkcountadv(info)
+			print("\n\tатак (авто/умений) | крит (%)")
+			print("\t" + str(atk + skill) + " ( " + str(atk) + "/" + str(skill) + " ) | " + str(krit) + " ( " + str(round((krit / (atk + skill)) * 100, 2)) + "% )")
